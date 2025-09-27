@@ -20,4 +20,3 @@
       args:
         creates: /usr/local/bin/helm
       register: helm_install_result
-      changed_when: false
