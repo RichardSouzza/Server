@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drone-config
+  namespace: drone
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drone-config
+  template:
+    metadata:
+      labels:
+        app: drone-config
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secrets
+      containers:
+        - name: drone-config
+          image: ghcr.io/richardsouzza/drone-config:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: DRONE_BIND
+              value: ":3000"
+            - name: DRONE_DEBUG
+              value: "true"
+            - name: DRONE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: drone-secrets
+                  key: DRONE_RPC_SECRET
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drone-config
+  namespace: drone
+spec:
+  selector:
+    app: drone-config
+  ports:
+    - protocol: TCP
+      port: 3000
+      targetPort: 3000
+

@@ -75,9 +75,10 @@ helm repo update
 4. Set Drone secrets on the server:
 
 ```sh
-kubectl create secret generic my-drone-secret \
+kubectl create secret generic drone-secrets \
   --namespace drone \
   --from-literal=DRONE_RPC_SECRET=$(openssl rand -hex 16) \
+  --from-literal=DRONE_CONFIG_SECRET=$(openssl rand -hex 16) \
   --from-literal=DRONE_GITHUB_CLIENT_ID=<drone_client_id> \
   --from-literal=DRONE_GITHUB_CLIENT_SECRET=<drone_client_secret>
 ```
@@ -107,7 +108,7 @@ env:
   DRONE_SERVER_PROTO: "http"
 
 extraSecretNamesForEnvFrom:
-  - my-drone-secret
+  - drone-secrets
 EOF
 ```
 
@@ -146,7 +147,7 @@ env:
   DRONE_RUNNER_NAME: "docker-runner"
 
 extraSecretNamesForEnvFrom:
-  - my-drone-secret
+  - drone-secrets
 EOF
 ```
 
@@ -165,3 +166,21 @@ helm upgrade drone-runner-docker drone/drone-runner-docker \
   --namespace drone \
   --values drone-values.yaml
 ```
+
+### [Drone Configuration Extension](https://docs.drone.io/extensions/configuration)
+
+13. Go to GitHub Settings -> [Developer Settings](https://github.com/settings/developers) -> Personal access tokens -> [Tokens (classic)](https://github.com/settings/tokens) -> [Generate new token (classic)](https://github.com/settings/tokens/new)
+
+14. Select scopes "repo" and "read:packages".
+
+15. Set Container Registry access secrets:
+
+```sh
+sudo kubectl create secret docker-registry ghcr-secrets \
+  --docker-server=ghcr.io \
+  --docker-username=<username> \
+  --docker-password=<accessToken> \
+  -n drone
+```
+
+
