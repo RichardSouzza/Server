@@ -1,4 +1,4 @@
-# Useful Scripts for Servers
+# Useful Tips for Server Management
 
 ## Setup
 
@@ -51,6 +51,23 @@ And then:
 ansible-playbook playbooks/site.yml -i inventory.yml --ask-become-pass
 ```
 
+## Kubeconfig
+
+1. Obtain read permission for `kubeconfig`:
+
+```sh
+mkdir -p ~/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+sudo chown $(id -u):$(id -g) ~/.kube/config
+chmod 600 ~/.kube/config
+```
+
+2. Add the following to `~/.bashrc`:
+
+```sh
+export KUBECONFIG=$HOME/.kube/config
+```
+
 ## [Helm](https://helm.sh) installation
 
 Simple run the playbook:
@@ -64,6 +81,7 @@ ansible-playbook playbooks/helm.yaml --ask-become-pass
 1. Add the Drone Helm Chart repository:
 
 ```sh
+kubectl create namespace drone
 helm repo add drone https://charts.drone.io
 helm repo update
 ```
@@ -94,6 +112,7 @@ helm pull drone/drone --untar
 6. Set Drone configurations:
 
 ```sh
+cd drone
 cat <<-EOF > ./drone-values.yaml
 ingress:
   enabled: true
@@ -115,7 +134,6 @@ EOF
 7. Install Drone Server:
 
 ```sh
-kubectl create namespace drone
 helm install drone drone/drone \
   --namespace drone \
   --values drone-values.yaml
@@ -140,6 +158,7 @@ helm pull drone/drone-runner-docker --untar
 10. Set Drone configurations
 
 ```sh
+cd drone-runner-docker
 cat <<-EOF > ./drone-values.yaml
 env:
   DRONE_RPC_PROTO: "http"
@@ -176,11 +195,53 @@ helm upgrade drone-runner-docker drone/drone-runner-docker \
 15. Set Container Registry access secrets:
 
 ```sh
-sudo kubectl create secret docker-registry ghcr-secrets \
+kubectl create secret docker-registry ghcr-secrets \
+  --namespace drone \
   --docker-server=ghcr.io \
   --docker-username=<username> \
-  --docker-password=<accessToken> \
-  -n drone
+  --docker-password=<accessToken>
 ```
 
+16. To verify the exposed addresses:
 
+```sh
+kubectl get ingress -n drone
+```
+
+## Troubleshooting
+
+### Resolution of external domains on a local network
+
+1. Prevent cloud-init from overwriting network configurations:
+
+```sh
+sudo vi /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+```
+
+```yaml
+network:
+  config: disabled
+```
+
+2. Remove `localhost` from the list of DNS search domains:
+
+```sh
+sudo vi /etc/resolv.conf
+```
+
+```patch
+--- /etc/resolv.conf
++++ /etc/resolv.conf
+@@ -1,5 +1,4 @@
+ ; Created by cloud-init automatically, do not edit.
+ ;
+-search localhost
+ nameserver 1.1.1.1
+ nameserver 8.8.4.4
+```
+
+3. Reboot to apply the changes:
+
+```sh
+$ sudo reboot
+```
