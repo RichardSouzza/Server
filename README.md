@@ -2,11 +2,20 @@
 
 ## Setup
 
+This script is designed for RHEL-based operating systems and aims to:
+
+- Update system packages;
+- Create server access users;
+- Harden SSH security—disables root login and password authentication, and enables key-based authentication;
+- Configure Fail2Ban—automatically bans upon the first password login attempt.
+
 1. Copy setup script for server:
 
 ```sh
 scp ./setup.sh root@<ip>:/root/
 ```
+
+**All commands from this point on must be executed on the server.**
 
 2. Allow script execution:
 
@@ -20,9 +29,23 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-## About [K3s](https://github.com/k3s-io/k3s-ansible)
+After the script completes, remember to copy the SSH keys and restart `sshd`.
 
-Just adapt `inventory.yml` to something like this:
+## [K3s](https://github.com/k3s-io/k3s-ansible) Installation
+
+1. Clone the K3s repository:
+
+```sh
+git clone https://github.com/k3s-io/k3s-ansible
+```
+
+2. Create the inventory file:
+
+```sh
+cp inventory-sample.yml inventory.yml
+```
+
+3. Adjust the `inventory.yml` to something like this:
 
 ```yml
 k3s_cluster:
@@ -45,7 +68,7 @@ k3s_cluster:
 
 ```
 
-And then:
+4. Run the playbook:
 
 ```sh
 ansible-playbook playbooks/site.yml -i inventory.yml --ask-become-pass
@@ -155,7 +178,7 @@ helm upgrade drone drone/drone \
 helm pull drone/drone-runner-docker --untar
 ```
 
-10. Set Drone configurations
+10. Set Drone configurations:
 
 ```sh
 cd drone-runner-docker
@@ -207,6 +230,15 @@ kubectl create secret docker-registry ghcr-secrets \
 ```sh
 kubectl get ingress -n drone
 ```
+
+#### MTU fix for pipeline clones:
+
+The Docker network that `drone-runner-docker` creates for each pipeline run does
+not inherit the daemon's MTU, which causes `git clone` (and other larger
+transfers) inside pipeline steps to fail on this cluster. The fix is a small Go
+reverse-proxy sidecar (`proxy.go`, in this repo) that sits between the Runner
+and the dind daemon and injects the correct MTU into every
+`POST .../networks/create` call.
 
 ## Troubleshooting
 
