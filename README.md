@@ -1,4 +1,4 @@
-# Useful Tips for Server Management
+# Useful Settings for Server Management
 
 ## Setup
 
@@ -65,7 +65,6 @@ k3s_cluster:
     opt_tls_san:
       - <ip>
       - <domain>
-
 ```
 
 4. Run the playbook:
@@ -85,7 +84,7 @@ sudo chown $(id -u):$(id -g) ~/.kube/config
 chmod 600 ~/.kube/config
 ```
 
-2. Add the following to `~/.bashrc`:
+2. Set the path for the K3s configuration in `~/.bashrc`:
 
 ```sh
 export KUBECONFIG=$HOME/.kube/config
@@ -93,7 +92,7 @@ export KUBECONFIG=$HOME/.kube/config
 
 ## [Helm](https://helm.sh) installation
 
-Simple run the playbook:
+Simple run the playbook from this repository:
 
 ```sh
 ansible-playbook playbooks/helm.yaml --ask-become-pass
@@ -211,7 +210,11 @@ helm upgrade drone-runner-docker drone/drone-runner-docker \
 
 ### [Drone Configuration Extension](https://docs.drone.io/extensions/configuration)
 
-13. Go to GitHub Settings -> [Developer Settings](https://github.com/settings/developers) -> Personal access tokens -> [Tokens (classic)](https://github.com/settings/tokens) -> [Generate new token (classic)](https://github.com/settings/tokens/new)
+13. Go to GitHub Settings
+-> [Developer Settings](https://github.com/settings/developers)
+-> Personal access tokens
+-> [Tokens (classic)](https://github.com/settings/tokens)
+-> [Generate new token (classic)](https://github.com/settings/tokens/new)
 
 14. Select scopes "repo" and "read:packages".
 
@@ -239,6 +242,74 @@ transfers) inside pipeline steps to fail on this cluster. The fix is a small Go
 reverse-proxy sidecar (`proxy.go`, in this repo) that sits between the Runner
 and the dind daemon and injects the correct MTU into every
 `POST .../networks/create` call.
+
+1. Create a ConfigMap from `proxy.go`:
+
+```sh
+kubectl create configmap docker-mtu-proxy -n drone --from-file=proxy.go=./proxy.go
+```
+
+2. Edit the `drone-runner-docker` deployment:
+
+```sh
+kubectl edit deployment -n drone drone-runner-docker
+```
+
+3. Add a volume for the proxy source (alongside the existing `storage` and `daemon-config` volumes):
+
+```yaml
+- configMap:
+    name: docker-mtu-proxy
+  name: mtu-proxy-src
+```
+
+4. Add a new sidecar container (alongside `dind`, `gc`, and `drone-runner-docker`):
+
+```yaml
+- name: mtu-proxy
+  image: golang:1.21-alpine
+  command: ["go", "run", "/src/proxy.go"]
+  volumeMounts:
+  - mountPath: /src
+    name: mtu-proxy-src
+```
+
+5. Point only the `drone-runner-docker` container (not `dind`, not `gc`) at the
+proxy, since it's the only one that creates pipeline networks:
+
+```yaml
+- name: DOCKER_HOST
+  value: tcp://localhost:2376
+```
+
+6. Confirm all 4 containers come up:
+
+```sh
+kubectl get pods -n drone -w
+```
+
+7. Verify the proxy is intercepting network creation correctly, on the next pipeline run:
+
+```sh
+kubectl exec -n drone -it <runner-pod> -c dind -- docker -H tcp://localhost:2375 network ls
+kubectl exec -n drone -it <runner-pod> -c dind -- docker -H tcp://localhost:2375 network inspect <drone-network-name>
+```
+
+`Options` should show `"com.docker.network.driver.mtu": "1400"`.
+
+Also set the daemon's own `--mtu` flag (used for the default `bridge` network,
+e.g. one-off `docker run` debugging) in the `dind` container's `command`:
+
+```yaml
+command:
+- dockerd
+- --config-file=/etc/docker/daemon.json
+- --mtu=1400
+```
+
+> Note: don't set `mtu` in both `/etc/docker/daemon.json` and the `--mtu` flag
+> at the same time — `dockerd` refuses to start if the same directive is set in
+> both places, even with matching values.
 
 ## Troubleshooting
 
@@ -277,3 +348,60 @@ sudo vi /etc/resolv.conf
 ```sh
 $ sudo reboot
 ```
+
+### Pipeline fails to clone with "Connection reset by peer"
+
+Symptom — a pipeline step fails while cloning, but only on larger
+repos/transfers (small requests, like the `drone-config` fetch, succeed):
+
+```sh
++ git clone https://github.com/<org>/<repo> .
+Cloning into '.'...
+fatal: unable to access 'https://github.com/<org>/<repo>/': Recv failure: Connection reset by peer
+```
+
+**Root cause:** `drone-runner-docker` creates a fresh Docker network for every
+pipeline run (visible as `drone-<random>` in `docker network ls`), and this
+per-run network does not inherit any MTU configured on the `dockerd`
+daemon — it always defaults to 1500. On this cluster, k3s's flannel VXLAN
+interface (`flannel.1`) has an effective MTU of 1450 (1500 minus VXLAN
+encapsulation overhead), so packets larger than that get dropped/reset instead
+of properly fragmented. This is a known limitation of CI tools (Drone, GitHub
+Actions Runner, GitLab Runner) that talk to the Docker Engine API directly via
+SDK rather than shelling out to the `docker` CLI — there's no daemon-level flag
+or `daemon.json` key that fixes per-run network MTU, because those only apply
+to the default `bridge` network.
+
+Fixed by the MTU proxy sidecar described instead [Drone Configuration Extension, MTU fix for pipeline clones](#mtu-fix-for-pipeline-clones).
+
+Diagnostic trail, in case this regresses (each step rules out one layer):
+
+1. Confirm host/flannel MTU is as expected: `ip link show eth0` (1500) vs
+`ip link show flannel.1` (1450) — this gap is normal for k3s VXLAN and is *not*
+itself the bug.
+
+2. Confirm `dind`'s default `docker0` bridge has the right MTU:
+`kubectl exec -n drone <pod> -c dind -- ip link show docker0`. Note this
+reports `NO-CARRIER`/`DOWN` and shows MTU 1500 at rest even when correctly
+configured — check `docker network inspect bridge` instead for the real applied
+value (`Options."com.docker.network.driver.mtu"`).
+
+3. Rule out the daemon config being stale: a `daemon.json` change
+(via ConfigMap) only takes effect on `dockerd` restart, never
+hot-reloads — `kubectl rollout restart deployment -n drone drone-runner-docker`
+after any change.
+
+4. `mtu` cannot be set in both `--mtu=<n>` (dockerd flag) and `daemon.json` at
+the same time — causes `CrashLoopBackOff` with `unable to configure the Docker
+daemon with file /etc/docker/daemon.json: the following directives are specified
+both as a flag and in the configuration file`. Pick one (the flag is the
+reliable one here).
+
+5. The actual bug: inspect the network a real pipeline run creates (not the
+default `bridge`, and not a manually-created test network) — `docker network
+inspect drone-<id>`. If `Options` is empty, the per-run network has no MTU
+override, confirming this issue.
+
+6. `net.ipv4.tcp_mtu_probing=1` (host or container) does **not** fix
+this — Path MTU Discovery depends on receiving an ICMP "fragmentation needed"
+reply, and that path appears to be black-holed here, so PMTUD never kicks in.
